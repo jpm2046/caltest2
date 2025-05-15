@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Whiteboard Compositor with XY Scaling</title>
+  <style>
+    body { font-family: sans-serif; padding: 1rem; }
+    #canvas {
+      display: block;
+      margin: 1rem 0;
+      border: 2px dashed #ccc;
+    }
+    .control {
+      margin: 0.5rem 0;
+    }
+    .control label {
+      display: inline-block;
+      width: 100px;
+    }
+    .control input[type=range] {
+      width: 250px;
+      vertical-align: middle;
+    }
+    .control span {
+      display: inline-block;
+      width: 60px;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <h1>Whiteboard Compositor</h1>
+
+  <p>
+    1️⃣ Upload your <strong>green-screen board</strong> PNG<br>
+    2️⃣ Upload your <strong>overlay image</strong><br>
+    3️⃣ Use the sliders below to position, scale, and rotate your overlay
+  </p>
+
+  <div>
+    <label>Board PNG:</label>
+    <input id="bgInput" type="file" accept="image/png">
+  </div>
+  <div>
+    <label>Overlay:</label>
+    <input id="fgInput" type="file" accept="image/*">
+  </div>
+
+  <!-- Position -->
+  <div class="control">
+    <label for="xSlider">X Offset:</label>
+    <input id="xSlider" type="range" min="-500" max="500" value="0">
+    <span id="xValue">0</span>
+  </div>
+  <div class="control">
+    <label for="ySlider">Y Offset:</label>
+    <input id="ySlider" type="range" min="-500" max="500" value="0">
+    <span id="yValue">0</span>
+  </div>
+
+  <!-- Uniform scale & Rotation -->
+  <div class="control">
+    <label for="scaleSlider">Uniform Scale:</label>
+    <input id="scaleSlider" type="range" min="0.1" max="3" step="0.01" value="1">
+    <span id="scaleValue">1.00</span>
+  </div>
+  <div class="control">
+    <label for="rotSlider">Rotation (°):</label>
+    <input id="rotSlider" type="range" min="-180" max="180" value="0">
+    <span id="rotValue">0°</span>
+  </div>
+
+  <!-- New X & Y scale -->
+  <div class="control">
+    <label for="scaleXSlider">Scale X:</label>
+    <input id="scaleXSlider" type="range" min="0.1" max="3" step="0.01" value="1">
+    <span id="scaleXValue">1.00</span>
+  </div>
+  <div class="control">
+    <label for="scaleYSlider">Scale Y:</label>
+    <input id="scaleYSlider" type="range" min="0.1" max="3" step="0.01" value="1">
+    <span id="scaleYValue">1.00</span>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const bgInput     = document.getElementById('bgInput');
+    const fgInput     = document.getElementById('fgInput');
+    const canvas      = document.getElementById('canvas');
+    const ctx         = canvas.getContext('2d');
+
+    // Sliders & displays
+    const xSlider     = document.getElementById('xSlider');
+    const ySlider     = document.getElementById('ySlider');
+    const scaleSlider = document.getElementById('scaleSlider');
+    const rotSlider   = document.getElementById('rotSlider');
+    const scaleXSlider= document.getElementById('scaleXSlider');
+    const scaleYSlider= document.getElementById('scaleYSlider');
+
+    const xValue      = document.getElementById('xValue');
+    const yValue      = document.getElementById('yValue');
+    const scaleValue  = document.getElementById('scaleValue');
+    const rotValue    = document.getElementById('rotValue');
+    const scaleXValue = document.getElementById('scaleXValue');
+    const scaleYValue = document.getElementById('scaleYValue');
+
+    let maskImg   = new Image(); // board frame w/ hole
+    let fgImg     = new Image(); // overlay
+    let boardRect = null;        // detected hole bounds
+
+    // Transform state
+    let offsetX   = 0;
+    let offsetY   = 0;
+    let scale      = 1;
+    let rotation   = 0; // degrees
+    let scaleX     = 1;
+    let scaleY     = 1;
+
+    // Hook slider events
+    xSlider.oninput = () => {
+      offsetX = +xSlider.value;
+      xValue.textContent = offsetX;
+      draw();
+    };
+    ySlider.oninput = () => {
+      offsetY = +ySlider.value;
+      yValue.textContent = offsetY;
+      draw();
+    };
+    scaleSlider.oninput = () => {
+      scale = +scaleSlider.value;
+      scaleValue.textContent = scale.toFixed(2);
+      draw();
+    };
+    rotSlider.oninput = () => {
+      rotation = +rotSlider.value;
+      rotValue.textContent = rotation + '°';
+      draw();
+    };
+    scaleXSlider.oninput = () => {
+      scaleX = +scaleXSlider.value;
+      scaleXValue.textContent = scaleX.toFixed(2);
+      draw();
+    };
+    scaleYSlider.oninput = () => {
+      scaleY = +scaleYSlider.value;
+      scaleYValue.textContent = scaleY.toFixed(2);
+      draw();
+    };
+
+    // 1) Load & mask green-screen board
+    bgInput.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const raw = new Image();
+      raw.src = URL.createObjectURL(file);
+      raw.onload = () => {
+        // resize canvas
+        canvas.width  = raw.naturalWidth;
+        canvas.height = raw.naturalHeight;
+
+        // offscreen draw to punch out green
+        const off = document.createElement('canvas');
+        off.width  = raw.naturalWidth;
+        off.height = raw.naturalHeight;
+        const offCtx = off.getContext('2d');
+        offCtx.drawImage(raw, 0, 0);
+
+        const data = offCtx.getImageData(0, 0, off.width, off.height);
+        const d = data.data;
+        let minX = off.width, minY = off.height, maxX = 0, maxY = 0;
+
+        for (let y = 0; y < off.height; y++) {
+          for (let x = 0; x < off.width; x++) {
+            const i = (y * off.width + x) * 4;
+            const r = d[i], g = d[i+1], b = d[i+2];
+            if (g > 200 && r < 120 && b < 120) {
+              d[i+3] = 0;
+              minX = Math.min(minX, x);
+              maxX = Math.max(maxX, x);
+              minY = Math.min(minY, y);
+              maxY = Math.max(maxY, y);
+            }
+          }
+        }
+        offCtx.putImageData(data, 0, 0);
+
+        boardRect = {
+          x:      minX,
+          y:      minY,
+          width:  maxX - minX + 1,
+          height: maxY - minY + 1
+        };
+
+        maskImg.src = off.toDataURL('image/png');
+        maskImg.onload = draw;
+      };
+    });
+
+    // 2) Load overlay image
+    fgInput.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      fgImg.src = URL.createObjectURL(file);
+      fgImg.onload = draw;
+    });
+
+    // single draw function
+    function draw() {
+      if (!maskImg.src || !boardRect) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // draw overlay with full TRS: translate → rotate → scaleX, scaleY → uniform scale
+      if (fgImg.src) {
+        const cx = boardRect.x + boardRect.width / 2 + offsetX;
+        const cy = boardRect.y + boardRect.height / 2 + offsetY;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(rotation * Math.PI / 180);
+        ctx.scale(scaleX * scale, scaleY * scale);
+        ctx.drawImage(
+          fgImg,
+          -boardRect.width / 2,
+          -boardRect.height / 2,
+          boardRect.width,
+          boardRect.height
+        );
+        ctx.restore();
+      }
+
+      // draw board frame on top
+      ctx.drawImage(maskImg, 0, 0);
+    }
+  </script>
+</body>
+</html>
